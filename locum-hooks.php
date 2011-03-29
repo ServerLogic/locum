@@ -31,5 +31,4 @@ class locum_server_hook extends locum {
   * Override class for locum_client
   */
 class locum_client_hook extends locum {
-  
 }

@@ -8,6 +8,9 @@
  */
 
 require_once('locum.php');
+// <CraftySpace+>
+// require_once('locum-hooks.php');
+// </CraftySpace+>
 
 /**
  * The Locum Client class represents the "front end" of Locum.  IE, the interactive piece.
@@ -28,7 +31,7 @@ class locum_client extends locum {
    * @param array $facet_args String-keyed array of facet parameters. See code below for array structure
    * @return array String-keyed result set
    */
-  public function search($type, $term, $limit, $offset, $sort_opt = NULL, $format_array = array(), $location_array = array(), $facet_args = array(), $override_search_filter = FALSE, $limit_available = FALSE, $show_inactive = FALSE) {
+  public function search($type, $term, $limit, $offset, $sort_opt = NULL, $format_array = array(), $location_array = array(), $facet_args = array(), $override_search_filter = FALSE, $limit_available = FALSE, $show_inactive = FALSE, $covers_only = FALSE) {
     if (is_callable(array(__CLASS__ . '_hook', __FUNCTION__))) {
       eval('$hook = new ' . __CLASS__ . '_hook;');
       return $hook->{__FUNCTION__}($type, $term, $limit, $offset, $sort_opt, $format_array, $location_array, $facet_args, $override_search_filter, $limit_available);
@@ -39,6 +42,9 @@ class locum_client extends locum {
 
     $term_arr = explode('?', trim(preg_replace('/\//', ' ', $term)));
     $term = trim($term_arr[0]);
+    // <CraftySpace+> tag list
+		$term_wrapper = $term[0];
+		// </CraftySpace+>
 
     if ($term == '*' || $term == '**') {
       $term = '';
@@ -47,9 +53,29 @@ class locum_client extends locum {
       //$term = preg_replace('/[^A-Za-z0-9*\- ]/iD', '', $term);
       $term = preg_replace('/\*\*/','*', $term);
     }
+    // <CraftySpace+> tag list
+		// Disable searching for private tag-based lists unless the list belongs to the current user.
+		// Note: if commented out line limiting $term were enabled, would need code to allow
+		// searching for other tag-based lists: e.g. starting with {, <, or (.
+		if ($term_wrapper == '[') {
+			$user_info_function = $this->locum_config['display_layer_info']['user_info_function'];
+			if ($user_info_function) {
+				$user_info = $user_info_function();
+				$matches = array();
+				if (preg_match('/^\[(\d+) /', $tag, $matches)) {
+					if ($matches[1] != $user_info['uid']) {
+					  return array();
+					}
+				}
+				else {return array();}
+			}
+			else {return array();}
+		}
+    // </CraftySpace+>
     $final_result_set['term'] = $term;
     $final_result_set['type'] = trim($type);
-
+	
+	
     $cl = new SphinxClient();
 
     $cl->SetServer($this->locum_config['sphinx_config']['server_addr'], (int) $this->locum_config['sphinx_config']['server_port']);
@@ -73,7 +99,8 @@ class locum_client extends locum {
         $term = preg_replace('/ OR /i',' | ',$term);
         $bool = TRUE;
       }
-
+      // <CraftySpace+> TODO: handle wrappers the same way?
+      // </CraftySpace+>
       // Is it a phrase search?
       if(preg_match("/\"/i", $term) || preg_match("/\@/i", $term)) {
         $cl->SetMatchMode(SPH_MATCH_EXTENDED2);
@@ -245,6 +272,28 @@ class locum_client extends locum {
       }
     }
 
+		// Limit to only covers?
+    if ($covers_only) {
+      $sql = "SELECT bnum FROM locum_bib_items WHERE bnum IN (" . implode(", ", $bib_hits_all) . ") AND cover_img IS NOT NULL";
+      $cover_limit_result =& $db->query($sql);
+      if ($cover_limit_result) {
+        $cover_hits = $cover_limit_result->fetchCol();
+        $cover_bib_hits = array();
+        $cover_bib_hits_all = array();
+        foreach ($bib_hits_all as $bib_hit) {
+          if (in_array($bib_hit, $cover_hits)) {
+            $count++;
+            $cover_bib_hits_all[] = $bib_hit;
+            if ($count > $offset && count($cover_bib_hits) < $limit) {
+              $cover_bib_hits[] = $bib_hit;
+            }
+          }
+        }
+        $bib_hits = $cover_bib_hits;
+        $bib_hits_all = $cover_bib_hits_all;
+      }
+    }
+		
     // Limit list to available
     if ($limit_available && $final_result_set['num_hits'] && (array_key_exists($limit_available, $this->locum_config['branches']) || $limit_available == 'any')) {
 
@@ -354,19 +403,65 @@ class locum_client extends locum {
 
       // Ages
       if (count($facet_args['age'])) {
+        // <CraftySpace+> Since age relies on cache, make sure it's set for all bibs
+        foreach ($bib_hits_all as $key => $bib_hit) {
+          $bib_avail = $this->get_item_status($bib_hit);
+        }
+        // </CraftySpace+>
         $age_or = '';
         $age_sql_cond = '';
         foreach ($facet_args['age'] as $facet_age) {
           $age_sql_cond .= $age_or . "age = '$facet_age'";
           $age_or = ' OR ';
         }
+        // <CraftySpace+>
+//        $age_sql_cond .= " OR age = 'all' ";
+        // </CraftySpace+>
         $sql = 'SELECT DISTINCT(bnum) FROM locum_avail_ages WHERE bnum IN (' . implode(', ', $bib_hits_all) . ") AND ($age_sql_cond)";
         $init_result =& $db->query($sql);
+        // <CraftySpace+> error handling
+        if (is_a($init_result, 'MDB2_Error')) {
+          $bib_hits_all = array();
+        }
+        else {
+          $age_hits = $init_result->fetchCol();
+          $bib_hits_all = array_intersect($bib_hits_all, $age_hits);
+        }
+        // </CraftySpace+>
+        /* <CraftySpace->
         $age_hits = $init_result->fetchCol();
         $bib_hits_all = array_intersect($bib_hits_all, $age_hits);
+        // </CraftySpace-> */
       }
 
+      // <CraftySpace+> subject facet
+      // Subjects
+      if (count($facet_args['facet_subject'])) {
+        $subject_or = '';
+        $subject_sql_cond = '';
+        foreach ($facet_args['facet_subject'] as $facet_subject) {
+          $subject_sql_cond .= $subject_or . "subjects = '$facet_subject'";
+          $subject_or = ' OR ';
+        }
+        $bib_hits_in = implode(', ', $bib_hits_all);
+        $sql = "
+          SELECT DISTINCT(bnum) 
+          FROM locum_bib_items_subject 
+          WHERE bnum IN ($bib_hits_in) 
+          AND ($subject_sql_cond)
+        ";
+        $init_result =& $db->query($sql);
+        $subject_hits = $init_result->fetchCol();
+        $bib_hits_all = array_intersect($bib_hits_all, $subject_hits);
+      }
+      // </CraftySpace+>
+      
+      // <CraftySpace+> No point faceting if no facet condition found
+      if(!empty($bib_hits_all) && $where) {
+      // </CraftySpace+>
+      /* <CraftySpace->
       if(!empty($bib_hits_all)) {
+      // </CraftySpace-> */
         $sql1 = 'SELECT bnum FROM locum_facet_heap WHERE bnum IN (' . implode(', ', $bib_hits_all) . ')' . $where;
         $sql2 = 'SELECT bnum FROM locum_facet_heap WHERE bnum IN (' . implode(', ', $bib_hits_all) . ')' . $where . ' ORDER BY FIELD(bnum,' . implode(', ', $bib_hits_all) . ") LIMIT $offset, $limit";
         $utf = "SET NAMES 'utf8' COLLATE 'utf8_unicode_ci'";
@@ -469,10 +564,49 @@ class locum_client extends locum {
         }
       }
 
+      // <CraftySpace+> subject facet
+      // Create subjects facets
+      $sql = "
+        SELECT subjects, COUNT(subjects)
+        FROM locum_bib_items_subject
+        $where_str
+        GROUP BY subjects
+        ORDER BY subjects
+      ";
+      $tmp_res =& $db->query($sql);
+      $tmp_res_arr = $tmp_res->fetchAll();
+      foreach ($tmp_res_arr as $values) {
+        if ($values[0] && $values[1]) { $result['subject'][$values[0]] = $values[1]; }
+      }
+      if (count($tmp_res_arr) > 50) {
+      	arsort($result['subject']);
+      	$count = 0;
+      	$temp = array();
+      	foreach ($result['subject'] as $k => $v) {
+      	  if ($count++ > 49) {break;}
+      		$temp[$k] = $v;
+      	}
+      	ksort($temp);
+      	$result['subject'] = $temp;
+      }
+      // </CraftySpace+>
+      
       $db->disconnect();
       return $result;
     }
   }
+  
+  // <CraftySpace+ type="INTERNAL">
+  /**
+   * Returns an array of item status info (availability, location, status, etc).
+   *
+   * @param string $bnum Bib number
+   * @return array Detailed item availability 
+   */
+  public function get_item_status_prefetch($bnums) {
+    $result = $this->locum_cntl->item_status_prefetch($bnums);
+  }
+  // </CraftySpace+>
 
   /**
    * Returns an array of item status info (availability, location, status, etc).
@@ -517,6 +651,11 @@ class locum_client extends locum {
     }
     $bib = self::get_bib_item($bnum);
     $status = $this->locum_cntl->item_status($bnum);
+    
+    //echo '<pre style="background-color:#fff; color:#000;">';
+    //print_r($status);
+    //echo '</pre>';
+
     $result['avail'] = 0;
     $result['total'] = count($status['items']);
     $result['libuse'] = 0;
@@ -981,6 +1120,7 @@ class locum_client extends locum {
   /*
    * Returns an array of random bibs.
    */
+  /* <CraftySpace-> unused function
   public function get_bib_numbers($limit = 10) {
     if (is_callable(array(__CLASS__ . '_hook', __FUNCTION__))) {
       eval('$hook = new ' . __CLASS__ . '_hook;');
@@ -997,6 +1137,7 @@ class locum_client extends locum {
     }
     return $bnums;
   }
+  // </CraftySpace-> */
 
   public function inum_to_bnum($inum, $force_refresh = FALSE) {
     $inum = intval($inum);
@@ -1149,5 +1290,4 @@ class locum_client extends locum {
   public function make_donation($donate_form_values) {
     return $this->locum_cntl->make_donation($donate_form_values);
   }
-
 }

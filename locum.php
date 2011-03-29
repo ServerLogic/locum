@@ -34,9 +34,17 @@ class locum {
         return;
       }
     }
+    // <CraftySpace+> temp until Alex's new system
+    if (function_exists('locum_constructor_override')) {
+		  locum_constructor_override($this);
+		  return;
+		}
+    // </CraftySpace+>
     
     $this->locum_config = parse_ini_file('config/locum.ini', true);
+    /* <CraftySpace-> moved to connector->init()
     $script_dir = realpath(dirname(__FILE__));
+    // </CraftySpace-> */
 
     // Take care of requirements
     require_once('MDB2.php');
@@ -50,9 +58,12 @@ class locum {
     // Fire up the Locum connector
     $locum_class_name = 'locum_' . $this->locum_config['ils_config']['ils'] . '_' . $this->locum_config['ils_config']['ils_version'];
     $this->locum_cntl =& new $locum_class_name;
+    /* <CraftySpace-> moved to connector->init()
     if (file_exists($script_dir . '/connectors/' . $connector_type . '/config/' . $connector_type . '.ini')) {
       $this->locum_config = array_merge($this->locum_config, parse_ini_file('connectors/' . $connector_type . '/config/' . $connector_type . '.ini', true));
     }
+    // </CraftySpace-> */
+    // <CraftySpace+> TODO: retrofit pvld to use this approach </CraftySpace+>
     // Allow connector to set itself up using locum_config info,
     // passing in $this so connector can use its methods.
     if (method_exists($this->locum_cntl, 'init')) {
@@ -164,5 +175,73 @@ class locum {
       return crc32($str);
     }
   }
+  
+	//<CraftySpace+ type="INTERNAL">
+	/**
+	 * Returns the contents of a url or urls. Internally caches the contents,
+	 * so that calling this function again for the same url during the same
+	 * request cycle is very fast. 
+	 *
+	 * @param string|array $urls Either a string with a single url or an array with multiple urls. 
+	 * @return string|array The contents fetched from the url(s). If the $urls parameter is a string, a string is returned. Otherwise, an array is returned with the same indexes as used for $urls. FALSE is returned for each failure.
+	 */
+	public function url_get_contents($urls, $bEmptyCache = FALSE) {
+	  static $url_contents = array();
+	  if ($bEmptyCache) {
+	    $url_contents = array();
+	  }
+	  
+	  // Configuration options
+	  // TODO: use them.
+	  $cache_size = $this->locum_config['curl_config']['cache_size'];
+	  if (!$cache_size) {
+	    $cache_size = 100;
+	  }
+	  $max_sessions = $this->locum_config['curl_config']['max_parallel_curl_sessions'];
+	  if (!$max_sessions) {
+	    $max_sessions = 10;
+	  }
+	  
+	  // Single URL requested.
+	  if (is_string($urls)) {
+	    $url = $urls;
+	    if (is_null($url_contents[$url])) {
+	      $url_contents[$url] = file_get_contents($url);
+	    }
+	    return $url_contents[$url];
+	  }
+	  
+	  // Multiple URLs requested.
+	  if (is_array($urls) && count($urls)) {
+	    $result = array();
+	    $session_index = array();
+	    $current_session_index = 0;
+	    // <CraftySpace+> TODO: undo
+	    include_once('CURL.php');
+	    // </CraftySpace+>
+	    /* <CraftySpace->
+	    require_once('CURL.php');
+	    // </CraftySpace-> */
+      $curl = new CURL();
+      $opts = array(CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true);
+      foreach ($urls as $i => $url) {
+        if (is_null($url_contents[$url]) && is_null($session_index[$url])) {
+          $curl->addSession($url, $opts);
+          $session_index[$url] = $current_session_index;
+          $current_session_index++;
+        }
+      }
+      $curl_result = $curl->exec();
+      foreach ($urls as $i => $url) {
+        if (!is_null($session_index[$url])) {
+          $url_contents[$url] = $curl_result[$session_index[$url]];
+        }
+        $result[$i] = $url_contents[$url];
+      }
+      $curl->clear();
+      return $result;
+	  }
+	}
+	//</CraftySpace+>
   
 }

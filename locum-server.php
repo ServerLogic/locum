@@ -90,6 +90,13 @@ class locum_server extends locum {
     $process_report['imported'] = 0;
     $utf = "SET NAMES 'utf8' COLLATE 'utf8_unicode_ci'";
     $utfprep = $db->query($utf);
+		
+		//<CraftySpace+ type="INTERNAL">
+		$config = $this->locum_config['curl_config']['where_parallel'];
+		if (array_key_exists('harvest', $config) && $config['harvest']) {
+//			$this->locum_cntl->scrape_bib_prefetch(range($start, $end));
+		}
+		//</CraftySpace+>
 
     for ($i = $start; $i <= $end; $i++) {
       $sql = "SELECT * FROM locum_bib_items WHERE bnum = $i";
@@ -117,10 +124,22 @@ class locum_server extends locum {
           $types = array('date', 'date', 'date', 'integer', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'integer', 'text', 'text', 'integer', 'text', 'text', 'text', 'integer', 'text');
           $sql_prep = $db->prepare('REPLACE INTO locum_bib_items VALUES (:bnum, :author, :addl_author, :title, :addl_title, :title_medium, :edition, :series, :callnum, :pub_info, :pub_year, :stdnum, :upc, :lccn, :descr, :notes, :subjects_ser, :lang, :loc_code, :mat_code, :cover_img, NOW(), :bib_created, :bib_lastupdate, :bib_prevupdate, :bib_revs, \'1\')');
           $affrows = $sql_prep->execute($bib_values);
+          // <CraftySpace+> error handling
+          if (is_a($affrows, 'MDB2_Error')) {
+          	$this->putlog("Failed to import bib # $i: " . $affrows->userinfo);
+          	continue;
+          }
+          // </CraftySpace+>
+    			// <CraftySpace+> tag list
+    			// Placeholder "hook" to be replaced by new hook system.
+  		    $sFile = trim(variable_get('sopac_insurge_path', '/usr/local/lib/insurge')) . '/insurge-client.php';
+  		    include_once($sFile);
+  				$insurge = new insurge_client();
+  				$insurge->after_bib_harvest($bib);
+    			// </CraftySpace+>
           $this->putlog("Importing bib # $i - $bib[title]");
           $sql_prep->free();
 
-/*
           if (is_array($subj) && count($subj)) {
             foreach ($subj as $subj_heading) {
               $insert_data = array($bib['bnum'], $subj_heading);
@@ -130,7 +149,6 @@ class locum_server extends locum {
               $sql_prep->free();
             }
           }
-*/
           $process_report['imported']++;
         }
       }
@@ -138,6 +156,19 @@ class locum_server extends locum {
     $db->disconnect();
     return $process_report;
   }
+  
+  // <CraftySpace+> sirsi
+  /**
+   * Ask ILS for bnums of all titles modified on submitted date.
+   *
+   * @param int $date_of_update in form yyyymmdd: e.g. 20100131
+   * @return array of bnums (or empty)
+   */
+  function get_updated_bibs($date_of_update) {
+  	$bnums = $this->locum_cntl->updated_bibs($date_of_update);
+  	return $bnums;
+  }
+  // </CraftySpace+>
 
   /**
    * Does the actual update of the bib record if something has changed.
@@ -146,7 +177,12 @@ class locum_server extends locum {
    * @param array $bib_arr Array of bibs like: key => val is bnum => last update date
    * @return array Array of # updated and # retired
    */
+  // <CraftySpace+> TODO: remove this change
+  public function update_bib($bib_arr, $only_covers = FALSE) {
+  // </CraftySpace+>
+  /* <CraftySpace->
   public function update_bib($bib_arr) {
+  // </CraftySpace-> */
     if (is_callable(array(__CLASS__ . '_hook', __FUNCTION__))) {
       eval('$hook = new ' . __CLASS__ . '_hook;');
       return $hook->{__FUNCTION__}($bib_arr);
@@ -157,13 +193,28 @@ class locum_server extends locum {
     $retired = 0;
     $skipped = 0;
 
+		//<CraftySpace+ type="INTERNAL">
+		$config = $this->locum_config['curl_config']['where_parallel'];
+		if (array_key_exists('harvest', $config) && $config['harvest']) {
+//			$this->locum_cntl->scrape_bib_prefetch(array_keys($bib_arr));
+		}
+		//</CraftySpace+>
+
     foreach ($bib_arr as $bnum => $init_bib_date) {
       if(!$firstbib) {
         $firstbib = $bnum;
       }
       $lastbib = $bnum;
 
+      // <CraftySpace+> TODO: remove this change
+      if ($only_covers) {
+      	$bib['bnum'] = $bnum;
+      }
+      else {$bib = $this->locum_cntl->scrape_bib($bnum, $this->locum_config['api_config']['skip_covers']);}
+      // </CraftySpace+>
+      /* <CraftySpace->
       $bib = $this->locum_cntl->scrape_bib($bnum, $this->locum_config['api_config']['skip_covers']);
+      // </CraftySpace-> */
       $utf = "SET NAMES 'utf8' COLLATE 'utf8_unicode_ci'";
       $utfprep = $db->query($utf);
 
@@ -176,19 +227,27 @@ class locum_server extends locum {
         $sql_prep->execute(array($bnum));
         $sql_prep->free();
         $retired++;
-      } else if ($bib == 'skip') {
+      } 
+      else if ($bib == 'skip') {
         // Do nothing.  This might happen if the ILS server is down.
         $skipped++;
-      } else if ($bib['bnum'] && $bib['bib_lastupdate'] != $init_bib_date) {
+      }
+// TODO: uncomment commented, and delete replacement after cover harvest done
+      // <CraftySpace+>
+      else if (!$only_covers && $bib['bnum'] && $bib['bib_lastupdate'] != $init_bib_date) {
+      // </CraftySpace+>
+      /* <CraftySpace->
+      else if ($bib['bnum'] && $bib['bib_lastupdate'] != $init_bib_date) {
+      // </CraftySpace-> */
         $subj = $bib['subjects'];
-        $valid_vals = array('bib_created', 'bib_lastupdate', 'bib_prevupdate', 'bib_revs', 'lang', 'loc_code', 'mat_code', 'author', 'addl_author', 'title', 'title_medium', 'addl_title', 'edition', 'series', 'callnum', 'pub_info', 'pub_year', 'stdnum', 'upc', 'lccn', 'descr', 'notes', 'bnum', 'download_link');
+        $valid_vals = array('bib_created', 'bib_lastupdate', 'bib_prevupdate', 'bib_revs', 'lang', 'loc_code', 'mat_code', 'author', 'addl_author', 'title', 'title_medium', 'addl_title', 'edition', 'series', 'callnum', 'pub_info', 'pub_year', 'stdnum', 'upc', 'lccn', 'descr', 'notes', 'bnum', 'cover_img', 'download_link');
         foreach ($bib as $bkey => $bval) {
           if (in_array($bkey, $valid_vals)) { $bib_values[$bkey] = $bval; }
         }
         
         $bib_values['subjects_ser'] = serialize($subj);
       
-        $types = array('date', 'date', 'date', 'integer', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'integer', 'text', 'text', 'integer', 'text', 'text', 'text', 'text');
+        $types = array('date', 'date', 'date', 'integer', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'integer', 'text', 'text', 'integer', 'text', 'text', 'text', 'text', 'text');
     
         $setlist = 
           "bib_created = :bib_created, " .
@@ -214,10 +273,25 @@ class locum_server extends locum {
           "descr = :descr, " .
           "notes = :notes, " .
           "subjects = :subjects_ser, " .
+          "cover_img = :cover_img, " .
+          "download_link = :download_link, " .
           "modified = NOW()";
       
         $sql_prep =& $db->prepare('UPDATE locum_bib_items SET ' . $setlist . ' WHERE bnum = :bnum', $types, MDB2_PREPARE_MANIP);
         $res = $sql_prep->execute($bib_values);
+        // <CraftySpace+> error handling
+        if (is_a($res, 'MDB2_Error')) {
+        	$this->putlog("Failed to import bib # $i: " . $affrows->userinfo);
+        	continue;
+        }
+        // </CraftySpace+>
+  			// <CraftySpace+> tag list
+  			// Placeholder "hook" to be replaced by new hook system.
+		    $sFile = trim(variable_get('sopac_insurge_path', '/usr/local/lib/insurge')) . '/insurge-client.php';
+		    include_once($sFile);
+				$insurge = new insurge_client();
+				$insurge->after_bib_update($bib);
+  			// </CraftySpace+>
         $sql_prep =& $db->prepare('DELETE FROM locum_bib_items_subject WHERE bnum = ?', array('integer'));
         $sql_prep->execute(array($bnum));
         $sql_prep->free();
@@ -237,11 +311,50 @@ class locum_server extends locum {
         $this->putlog("Updated record # $bnum - $bib[title]", 2, TRUE);
         $updated++;
       }
+      // <CraftySpace+>
+      else if ($bib['bnum'] && ($only_covers || $bib['cover_img'])) {
+        $harvested_img = $bib['cover_img'];
+        // TODO remove entire if clause
+        if ($only_covers) {
+          // Get isbn from db.
+          $sql = "SELECT cover_img, stdnum FROM locum_bib_items WHERE bnum = ?";
+          $sql_prep =& $db->prepare($sql, array('integer'));
+          $records = $sql_prep->execute(array($bib['bnum']))->fetchAll(MDB2_FETCHMODE_ASSOC);
+        	$db_img = $records[0]['cover_img'];
+        	$db_stdnum = $records[0]['stdnum'];
+        	$harvested_img = $this->get_cover_img($db_stdnum);
+        	if (!$harvested_img || $db_img == $harvested_img) {continue;}
+        }
+        if (!stristr($harvested_img, 'LC.')) {
+          // Get current img url from db.
+          // TODO: remove if clause, but keep what's inside it
+          if (!$db_img) {
+            $sql = "SELECT cover_img FROM locum_bib_items WHERE bnum = ?";
+            $sql_prep =& $db->prepare($sql, array('integer'));
+            $records = $sql_prep->execute(array($bib['bnum']))->fetchAll(MDB2_FETCHMODE_ASSOC);
+          	$db_img = $records[0]['cover_img'];
+          }
+        	if (stristr($db_img, 'LC.') || stristr($db_img, 'MC.')) {continue;}
+        	if ($db_img && stristr($harvested_img, 'SC.')) {continue;}
+        }
+        
+        // If we haven't continued, harvested is larger than db version, so update db
+        $sql = "UPDATE locum_bib_items SET cover_img = :cover_img WHERE bnum = :bnum";
+        $types = array('text', 'integer');
+        $sql_prep =& $db->prepare($sql, $types, MDB2_PREPARE_MANIP);
+        $bib_values = array('bnum' => $bib['bnum'], 'cover_img' => $harvested_img);
+        $res = $sql_prep->execute($bib_values);
+        if (is_a($res, 'MDB2_Error')) {
+        	$this->putlog("Failed to insert large cover # $i: " . $affrows->userinfo);
+        	continue;
+        }
+      // </CraftySpace+>
     }
     $db->disconnect();
     $this->putlog("Processed $firstbib - $lastbib");
     return array('retired' => $retired, 'updated' => $updated, 'skipped' => $skipped);
   }
+}
 
   /**
    * Scans for newly cataloged bib records.
@@ -574,7 +687,7 @@ class locum_server extends locum {
     
     $this->putlog("Collecting current data keys ..");
     $db = MDB2::connect($this->dsn);
-    $sql = "SELECT stdnum,bib_lastupdate FROM locum_bib_items WHERE stdnum IS NOT NULL ORDER BY bib_lastupdate DESC LIMIT $limit";
+    $sql = "SELECT stdnum, bib_lastupdate FROM locum_bib_items WHERE stdnum IS NOT NULL ORDER BY bib_lastupdate DESC LIMIT $limit";
     $init_result = $db->query($sql);
     $init_bib_arr = $init_result->fetchAll(MDB2_FETCHMODE_ASSOC);
     
@@ -732,7 +845,6 @@ class locum_server extends locum {
 
   /************ External Content Functions ************/
   
-
   /**
    * Grabs the cover image URL for caching (much faster on the front-end to do it this way).
    * Will try amazon if the ini says so.
@@ -824,11 +936,24 @@ class locum_server extends locum {
     list($version, $status_code, $msg) = explode(' ', $http_response_header[0], 3);
     if (preg_match('/xml/', $syn_dl) && $status_code == '200') {
       $syn = simplexml_load_string($syn_dl);
+      // <CraftySpace+>
+      $image_sizes = array('LC', 'MC', 'SC');
+      foreach ($image_sizes as $size) {
+      	if ($syn->{$size}) {
+          $image_url = 'http://www.syndetics.com/index.php?type=hw7&isbn=' . $stdnum . '/' . $syn->{$size} . '&client=' . $cust_id;
+          $img_size = @getimagesize($image_url);
+          if ($img_size[0] == 1) { $image_url = ''; }
+          else {break;}
+      	}
+      }
+      // </CraftySpace+>
+      /* <CraftySpace->
       if ($syn->SC == 'SC.GIF') {
         $image_url = 'http://www.syndetics.com/index.php?type=hw7&isbn=' . $stdnum . '/SC.GIF&client=' . $cust_id;
         $img_size = @getimagesize($image_url);
         if ($img_size[0] == 1) { $image_url = ''; }
       }
+      // </CraftySpace-> */
     }
     return $image_url;
   }
@@ -894,6 +1019,72 @@ class locum_server extends locum {
     $db->disconnect();
     return $link_result;
   }
-  
+	
+	//<CraftySpace+ type="INTERNAL">
+	
+	/**
+	 * Pre-fetch the urls associated with cover images to speed up the processing when get_cover_img() is called.
+	 * 
+	 * @see get_cover_img()
+	 */
+	public function get_cover_img_prefetch($stdnums) {
+		// Format stdnums as best we can
+		foreach ($stdnums as $i => $stdnum_raw) {
+  		if (preg_match('/ /', $stdnum_raw)) {
+  			$stdnum_arr = explode(' ', $stdnum_raw);
+  			$stdnum = trim($stdnum_arr[0]);
+  		} else {
+  			$stdnum = trim($stdnum_raw);
+  		}
+  		$stdnums[$i] = $stdnum;
+		}
+		
+		// Pre-fetch from amazon and syndetic
+		$api_cfg = $this->locum_config[api_config];
+		if ($api_cfg[use_amazon_images]) {
+		  self::get_amazon_image_prefetch($stdnums, $api_cfg[amazon_access_key]);
+		}
+		if ($api_cfg[use_syndetic_images]) {
+			self::get_syndetic_image_prefetch($stdnums, $api_cfg[syndetic_custid]);
+		}
+	}
+
+	/**
+	 * Pre-fetch cover images from amazon.
+	 * 
+	 * @see get_amazon_image()
+	 */
+	public function get_amazon_image_prefetch($stdnums, $api_key) {
+	  $urls = array();
+	  foreach ($stdnums as $stdnum) {
+	    $url =  'http://webservices.amazon.com/onca/xml?Service=AWSECommerceService';
+  		$url.=  "&AWSAccessKeyId=$api_key";
+  		$url.=  "&Operation=ItemLookup&IdType=ASIN&ItemId=$stdnum";
+  		$url.=  '&ResponseGroup=Medium,OfferFull';
+  		$urls[] = $url;
+	  }
+		self::url_get_contents($urls);
+	}
+
+	/**
+	 * Pre-fetch cover images from syndetic.
+	 * 
+	 * @see get_syndetic_image()
+	 */
+	public function get_syndetic_image_prefetch($stdnums, $cust_id) {
+	  $urls = array();
+	  foreach ($stdnums as $stdnum) {
+	    $urls[] = 'http://www.syndetics.com/index.aspx?isbn=' . $stdnum . '/index.xml&client=' . $cust_id . '&type=xw10';
+	    // <CraftySpace+>
+	    $urls[] = 'http://www.syndetics.com/index.php?type=hw7&isbn=' . $stdnum . '/LC.JPG&client=' . $cust_id;
+	    // </CraftySpace+>
+	    /* <CraftySpace->
+	    $urls[] = 'http://www.syndetics.com/index.php?type=hw7&isbn=' . $stdnum . '/SC.GIF&client=' . $cust_id;
+	    // </CraftySpace-> */
+	  }
+		self::url_get_contents($urls);
+	}
+	
+	//</CraftySpace+>
 
 }
